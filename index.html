@@ -282,6 +282,34 @@ body { font-family: "DM Sans", sans-serif; background: var(--bg); color: var(--t
 
 .empty { padding: 4rem 2rem; text-align: center; color: var(--muted); font-size: 13px; }
 .empty-sm { padding: 1rem 16px; font-size: 13px; color: var(--muted); }
+
+/* ── Claude connections ── */
+.conn-loading { display: flex; align-items: center; gap: 10px; padding: 1.25rem 16px; font-size: 13px; color: var(--muted); }
+.conn-spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; flex-shrink: 0; }
+.claude-conn { background: #fafaf7; }
+.conn-reason { font-size: 12px; color: var(--accent-t); background: var(--accent-l); border-radius: 6px; padding: 5px 10px; margin-bottom: 7px; line-height: 1.5; font-style: italic; }
+
+/* ── Idea Map ── */
+#map-wrap { width: 100%; display: flex; flex-direction: column; gap: 10px; }
+#map-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+#map-status { font-size: 13px; color: var(--muted); }
+#map-tools { display: flex; gap: 6px; }
+.map-tool-btn { padding: 5px 11px; border: 1px solid var(--border); border-radius: var(--r); font-family: "DM Sans", sans-serif; font-size: 12px; background: transparent; color: var(--muted); cursor: pointer; }
+.map-tool-btn:hover { color: var(--text); }
+#map-hint { font-size: 11px; color: var(--faint); }
+#map-canvas { display: block; border: 1px solid var(--border); border-radius: var(--rl); background: var(--surface); cursor: grab; }
+#map-detail { min-height: 0; }
+.map-detail-inner { background: var(--surface); border: 1px solid var(--border); border-radius: var(--rl); overflow: hidden; margin-top: 4px; }
+.map-detail-header { padding: 14px 18px 12px; border-bottom: 1px solid var(--border); }
+.map-detail-title { font-family: "Instrument Serif", serif; font-size: 17px; margin-bottom: 4px; }
+.map-detail-meta { font-size: 12px; color: var(--muted); }
+.map-detail-hls { max-height: 320px; overflow-y: auto; }
+.map-hl-item { padding: 12px 18px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background .1s; }
+.map-hl-item:last-child { border-bottom: none; }
+.map-hl-item:hover { background: var(--accent-l); }
+.map-hl-text { font-size: 13px; line-height: 1.7; }
+.map-hl-note { font-size: 11px; color: var(--muted); font-style: italic; margin-top: 5px; }
+.map-hl-date { font-size: 11px; color: var(--faint); margin-top: 5px; }
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 @media (max-width: 700px) { .sidebar { display: none; } .topbar { padding: 0 1rem; gap: 6px; } .main { padding: 1rem; } }
@@ -316,6 +344,7 @@ body { font-family: "DM Sans", sans-serif; background: var(--bg); color: var(--t
     <div class="logo">Readwise <span>Highlights</span></div>
     <button class="tab-btn on" data-tab="highlights">Highlights</button>
     <button class="tab-btn" data-tab="network">Theme Network</button>
+    <button class="tab-btn" data-tab="map">Idea Map</button>
     <div class="tab-div"></div>
     <div id="hl-controls" style="display:contents;">
       <div class="search-wrap">
