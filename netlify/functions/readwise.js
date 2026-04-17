@@ -1,3 +1,4 @@
+// Uses Node's built-in https module — no external dependencies, works on all Node versions.
 const https = require('https');
 
 function httpsGet(url, headers) {
