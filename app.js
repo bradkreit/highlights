@@ -458,7 +458,7 @@
   function renderConn(h) {
     if (!S.sel) {
       return '<div class="conn-intro"><h3>Connections Explorer</h3>'
-        + '<p>Click any highlight to find related ones across your library.</p></div>'
+        + '<p>Click any highlight — Claude will find conceptual connections across your library, not just shared words.</p></div>'
         + h.slice(0, 60).map(function (x) {
           return '<div class="grp conn-pick" data-sel="' + x.id + '">'
             + '<div class="grp-hdr"><span class="grp-title">' + esc(x.title) + '</span><span class="grp-author">' + esc(x.author) + '</span></div>'
@@ -468,25 +468,54 @@
     }
     var sel = HIGHLIGHTS.find(function (x) { return x.id === S.sel; });
     if (!sel) return '';
-    var conns = connections(sel);
-    return '<div class="back" id="conn-back">← Back</div>'
+
+    // Show loading state, then async load Claude connections
+    var color = THEME_COLORS[sel.theme] || '#2d5a3d';
+    var html = '<div class="back" id="conn-back">← Back</div>'
       + '<div class="conn-sel">'
       + '<div class="conn-lbl">Selected highlight</div>'
       + '<div class="conn-src">' + esc(sel.title) + ' &middot; ' + esc(sel.author) + '</div>'
       + '<div class="conn-qt">' + esc(sel.text || '') + '</div>'
       + '</div>'
-      + '<div class="results-box"><div class="results-hdr">Related highlights (' + conns.length + ')</div>'
-      + (conns.length === 0
-        ? '<div class="empty-sm">No strong matches found — try a different highlight.</div>'
-        : conns.map(function (c) {
-            var color = THEME_COLORS[c.h.theme] || '#ccc';
-            return '<div class="rel-item">'
-              + '<span class="rel-score">' + c.score + ' shared</span>'
-              + '<div class="rel-body"><div class="rel-text">' + esc((c.h.text || '').slice(0, 200)) + ((c.h.text || '').length > 200 ? '…' : '') + '</div>'
-              + '<div class="rel-src"><span class="rel-theme-dot" style="background:' + color + '"></span>' + esc(c.h.title) + ' &middot; ' + esc(c.h.author) + '</div></div>'
-              + '</div>';
-          }).join('')
-      ) + '</div>';
+      + '<div class="results-box">'
+      + '<div class="results-hdr" id="conn-results-hdr">Finding connections with Claude…</div>'
+      + '<div id="conn-results-body"><div class="conn-loading"><div class="conn-spinner"></div><span>Analyzing your library…</span></div></div>'
+      + '</div>';
+
+    // Async: fetch Claude connections then update DOM
+    claudeConnections(sel).then(function(results) {
+      var hdrEl = document.getElementById("conn-results-hdr");
+      var bodyEl = document.getElementById("conn-results-body");
+      if (!hdrEl || !bodyEl) return;
+
+      if (!results || results.length === 0) {
+        // fallback to word matching
+        var fallback = connections(sel);
+        hdrEl.textContent = "Related highlights (" + fallback.length + ")";
+        bodyEl.innerHTML = fallback.length === 0
+          ? "<div class='empty-sm'>No strong matches found.</div>"
+          : fallback.map(function(c) {
+              var col = THEME_COLORS[c.h.theme] || "#ccc";
+              return "<div class='rel-item'><span class='rel-score'>" + c.score + " shared</span>"
+                + "<div class='rel-body'><div class='rel-text'>" + esc((c.h.text||"").slice(0,200)) + "</div>"
+                + "<div class='rel-src'><span class='rel-theme-dot' style='background:" + col + "'></span>" + esc(c.h.title) + " &middot; " + esc(c.h.author) + "</div></div></div>";
+            }).join("");
+        return;
+      }
+
+      hdrEl.textContent = "Claude found " + results.length + " conceptual connections";
+      bodyEl.innerHTML = results.map(function(r) {
+        var col = THEME_COLORS[r.h.theme] || "#ccc";
+        return "<div class='rel-item claude-conn'>"
+          + "<div class='rel-body'>"
+          + "<div class='conn-reason'>" + esc(r.connection) + "</div>"
+          + "<div class='rel-text'>" + esc((r.h.text||"").slice(0,200)) + ((r.h.text||"").length>200?"…":"") + "</div>"
+          + "<div class='rel-src'><span class='rel-theme-dot' style='background:" + col + "'></span>" + esc(r.h.title) + " &middot; " + esc(r.h.author) + "</div>"
+          + "</div></div>";
+      }).join("");
+    });
+
+    return html;
   }
 
   /* ══════════════════════════════════════
@@ -714,6 +743,10 @@
       if (NET.animFrame) cancelAnimationFrame(NET.animFrame);
       renderNetwork(); return;
     }
+    if (S.tab === 'map') {
+      if (NET.animFrame) { cancelAnimationFrame(NET.animFrame); NET.animFrame = null; }
+      renderIdeaMap(); return;
+    }
     if (NET.animFrame) { cancelAnimationFrame(NET.animFrame); NET.animFrame = null; }
 
     var mc = document.getElementById('main');
@@ -790,5 +823,445 @@
   var saved = localStorage.getItem('rw_token');
   if (saved) { TOKEN = saved; loadData(); }
   else showPhase('token');
+
+  /* ══════════════════════════════════════
+     CLAUDE-POWERED CONNECTIONS (#3)
+  ══════════════════════════════════════ */
+
+  var connCache = {}; // cache by highlight id
+
+  async function claudeConnections(h) {
+    if (connCache[h.id]) return connCache[h.id];
+
+    // Build candidate pool: pick highlights from OTHER themes, diverse books
+    var others = HIGHLIGHTS.filter(function(x) {
+      return x.id !== h.id && x.theme !== h.theme;
+    });
+    // Shuffle and take 40 candidates spread across themes
+    var byTheme = {};
+    others.forEach(function(x) {
+      if (!byTheme[x.theme]) byTheme[x.theme] = [];
+      byTheme[x.theme].push(x);
+    });
+    var candidates = [];
+    Object.values(byTheme).forEach(function(group) {
+      // shuffle group
+      for (var i = group.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var tmp = group[i]; group[i] = group[j]; group[j] = tmp;
+      }
+      candidates = candidates.concat(group.slice(0, 7));
+    });
+    // Also add some from same theme for richer results
+    var sameTheme = HIGHLIGHTS.filter(function(x) { return x.id !== h.id && x.theme === h.theme; });
+    for (var i = sameTheme.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var tmp = sameTheme[i]; sameTheme[i] = sameTheme[j]; sameTheme[j] = tmp;
+    }
+    candidates = candidates.concat(sameTheme.slice(0, 8));
+
+    var candidateList = candidates.map(function(c, i) {
+      return i + ': [' + c.title.slice(0, 40) + '] ' + c.text.slice(0, 120);
+    }).join('\n');
+
+    var prompt = 'You are analyzing reading highlights to find genuine conceptual connections.\n\n'
+      + 'SOURCE HIGHLIGHT:\n"' + h.text.slice(0, 300) + '"\n'
+      + 'From: ' + h.title.slice(0, 60) + ' by ' + h.author + '\n\n'
+      + 'CANDIDATE HIGHLIGHTS (numbered 0-' + (candidates.length - 1) + '):\n'
+      + candidateList + '\n\n'
+      + 'Find the 4-5 candidates that connect most meaningfully to the source highlight through shared IDEAS, THEMES, or INTELLECTUAL TENSIONS — not just shared words.\n'
+      + 'Look for: same concept explored differently, contrasting perspectives, one idea illuminating another, surprising parallels.\n\n'
+      + 'Respond with ONLY a JSON array. No markdown, no explanation outside the JSON:\n'
+      + '[{"index": 0, "connection": "One sentence explaining the conceptual link"}, ...]\n'
+      + 'Return exactly 4-5 items, ordered by strength of connection.';
+
+    try {
+      var resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 600,
+          messages: [{ role: 'user', content: prompt }]
+        })
+      });
+      var data = await resp.json();
+      var text = (data.content || []).filter(function(c) { return c.type === 'text'; }).map(function(c) { return c.text; }).join('');
+      // strip markdown fences if present
+      text = text.replace(/```json|```/g, '').trim();
+      var parsed = JSON.parse(text);
+      var results = parsed.map(function(item) {
+        return { h: candidates[item.index], connection: item.connection };
+      }).filter(function(x) { return x.h; });
+      connCache[h.id] = results;
+      return results;
+    } catch(e) {
+      return null; // fall back to word-matching
+    }
+  }
+
+  /* ══════════════════════════════════════
+     IDEA MAP (#6)
+  ══════════════════════════════════════ */
+
+  var mapPositions = null; // cached book positions
+  var MAP = { canvas: null, ctx: null, width: 0, height: 0, animFrame: null,
+              scale: 1, panX: 0, panY: 0, isPanning: false, lastPanX: 0, lastPanY: 0,
+              hoveredBook: null, expandedBook: null, hlNodes: [] };
+
+  async function computeMapPositions() {
+    // Check localStorage cache first
+    var cached = localStorage.getItem('rw_map_positions_v2');
+    if (cached) {
+      try { return JSON.parse(cached); }
+      catch(e) {}
+    }
+
+    // Build book data for Claude
+    var books = {};
+    HIGHLIGHTS.forEach(function(h) {
+      if (!books[h.title]) books[h.title] = { author: h.author, theme: h.theme, count: 0, samples: [] };
+      books[h.title].count++;
+      if (books[h.title].samples.length < 2) books[h.title].samples.push(h.text.slice(0, 80));
+    });
+
+    var bookList = Object.entries(books).map(function(e, i) {
+      return i + ': ' + e[0].slice(0, 50) + ' [' + e[1].theme + '] — ' + e[1].samples[0];
+    }).join('\n');
+
+    var prompt = 'You are creating a 2D conceptual map of books based on their ideas.\n\n'
+      + 'Place these books in a 2D space (x: -100 to 100, y: -100 to 100) so that:\n'
+      + '- Books with closely related IDEAS are near each other\n'
+      + '- Books with contrasting or unrelated ideas are far apart\n'
+      + '- Use the full space — spread books out, avoid clustering everything in the center\n'
+      + '- Consider: systems thinking, decision-making, economics, politics, personal growth, fiction, technology\n\n'
+      + 'BOOKS:\n' + bookList + '\n\n'
+      + 'Respond with ONLY a JSON array, no markdown:\n'
+      + '[{"index": 0, "x": 45, "y": -23}, ...]\n'
+      + 'Return ALL ' + Object.keys(books).length + ' books.';
+
+    var resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 2000,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    var data = await resp.json();
+    var text = (data.content || []).filter(function(c) { return c.type === 'text'; }).map(function(c) { return c.text; }).join('');
+    text = text.replace(/```json|```/g, '').trim();
+    var coords = JSON.parse(text);
+
+    // Combine with book data
+    var bookEntries = Object.entries(books);
+    var positions = coords.map(function(c) {
+      var entry = bookEntries[c.index];
+      if (!entry) return null;
+      return {
+        title: entry[0],
+        author: entry[1].author,
+        theme: entry[1].theme,
+        count: entry[1].count,
+        x: c.x,
+        y: c.y
+      };
+    }).filter(Boolean);
+
+    localStorage.setItem('rw_map_positions_v2', JSON.stringify(positions));
+    return positions;
+  }
+
+  function renderIdeaMap() {
+    var mc = document.getElementById('main');
+    mc.innerHTML = '<div id="map-wrap">'
+      + '<div id="map-toolbar">'
+      + '<span id="map-status">Building your idea map with Claude…</span>'
+      + '<div id="map-tools">'
+      + '<button class="map-tool-btn" id="map-reset-btn">Reset view</button>'
+      + '<button class="map-tool-btn" id="map-clear-cache-btn">Refresh map</button>'
+      + '</div></div>'
+      + '<div id="map-hint">Scroll to zoom &middot; Drag to pan &middot; Click a book to explore its highlights</div>'
+      + '<canvas id="map-canvas"></canvas>'
+      + '<div id="map-detail"></div>'
+      + '</div>';
+
+    var canvas = document.getElementById('map-canvas');
+    MAP.canvas = canvas;
+    MAP.ctx = canvas.getContext('2d');
+
+    function resizeCanvas() {
+      var wrap = document.getElementById('map-wrap'); if (!wrap) return;
+      MAP.width = wrap.clientWidth;
+      MAP.height = Math.max(500, window.innerHeight - 160);
+      canvas.width = MAP.width * window.devicePixelRatio;
+      canvas.height = MAP.height * window.devicePixelRatio;
+      canvas.style.width = MAP.width + 'px';
+      canvas.style.height = MAP.height + 'px';
+      MAP.ctx.setTransform(1,0,0,1,0,0);
+      MAP.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+      if (mapPositions) drawMap();
+    }
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
+    document.getElementById('map-reset-btn').addEventListener('click', function() {
+      MAP.scale = 1; MAP.panX = 0; MAP.panY = 0;
+      MAP.expandedBook = null; MAP.hlNodes = [];
+      document.getElementById('map-detail').innerHTML = '';
+      drawMap();
+    });
+    document.getElementById('map-clear-cache-btn').addEventListener('click', function() {
+      localStorage.removeItem('rw_map_positions_v2');
+      mapPositions = null; MAP.expandedBook = null; MAP.hlNodes = [];
+      document.getElementById('map-status').textContent = 'Rebuilding map…';
+      loadAndDrawMap();
+    });
+
+    loadAndDrawMap();
+  }
+
+  async function loadAndDrawMap() {
+    try {
+      mapPositions = await computeMapPositions();
+      document.getElementById('map-status').textContent = 'Your reading — ' + mapPositions.length + ' books mapped by conceptual proximity';
+      MAP.scale = 1; MAP.panX = 0; MAP.panY = 0;
+      drawMap();
+      bindMapEvents();
+    } catch(e) {
+      var el = document.getElementById('map-status');
+      if (el) el.textContent = 'Map error: ' + e.message;
+    }
+  }
+
+  function worldToScreen(wx, wy) {
+    var cx = MAP.width / 2 + MAP.panX;
+    var cy = MAP.height / 2 + MAP.panY;
+    var spread = Math.min(MAP.width, MAP.height) * 0.42 * MAP.scale;
+    return {
+      x: cx + wx / 100 * spread,
+      y: cy + wy / 100 * spread
+    };
+  }
+
+  function screenToWorld(sx, sy) {
+    var cx = MAP.width / 2 + MAP.panX;
+    var cy = MAP.height / 2 + MAP.panY;
+    var spread = Math.min(MAP.width, MAP.height) * 0.42 * MAP.scale;
+    return {
+      x: (sx - cx) / spread * 100,
+      y: (sy - cy) / spread * 100
+    };
+  }
+
+  function bookRadius(b) {
+    return Math.max(14, Math.min(38, 10 + b.count * 0.06)) * Math.sqrt(MAP.scale);
+  }
+
+  function drawMap() {
+    if (!mapPositions || !MAP.ctx) return;
+    var ctx = MAP.ctx, W = MAP.width, H = MAP.height;
+    ctx.clearRect(0, 0, W, H);
+
+    // subtle grid
+    ctx.strokeStyle = '#e8e4dc';
+    ctx.lineWidth = 0.5;
+    var spread = Math.min(W, H) * 0.42 * MAP.scale;
+    var cx = W/2 + MAP.panX, cy = H/2 + MAP.panY;
+    [-100,-75,-50,-25,0,25,50,75,100].forEach(function(v) {
+      var sx = cx + v/100*spread, sy = cy + v/100*spread;
+      ctx.beginPath(); ctx.moveTo(sx,0); ctx.lineTo(sx,H); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0,sy); ctx.lineTo(W,sy); ctx.stroke();
+    });
+
+    // draw connections between expanded book's highlights and other books (if any)
+    if (MAP.expandedBook && MAP.hlNodes.length) {
+      // draw faint lines from expanded book to related books (same theme)
+      mapPositions.forEach(function(b) {
+        if (b.title === MAP.expandedBook.title) return;
+        if (b.theme !== MAP.expandedBook.theme) return;
+        var s = worldToScreen(MAP.expandedBook.x, MAP.expandedBook.y);
+        var t = worldToScreen(b.x, b.y);
+        ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(t.x, t.y);
+        ctx.strokeStyle = (THEME_COLORS[b.theme] || '#999') + '30';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      });
+    }
+
+    // draw books
+    mapPositions.forEach(function(b) {
+      var pos = worldToScreen(b.x, b.y);
+      var r = bookRadius(b);
+      var color = THEME_COLORS[b.theme] || '#888';
+      var isHov = MAP.hoveredBook && MAP.hoveredBook.title === b.title;
+      var isExp = MAP.expandedBook && MAP.expandedBook.title === b.title;
+      var isDim = (MAP.expandedBook && !isExp);
+
+      ctx.globalAlpha = isDim ? 0.35 : 1;
+      if (isHov || isExp) { ctx.shadowColor = color; ctx.shadowBlur = 16; }
+
+      // circle
+      ctx.beginPath(); ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = isExp ? color + 'dd' : color + '28';
+      ctx.fill();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isExp ? 2.5 : isHov ? 2 : 1.5;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      // label
+      var maxW = r * 3.5;
+      var shortTitle = b.title.length > 28 ? b.title.slice(0, 26) + '…' : b.title;
+      ctx.fillStyle = isExp ? color : (isDim ? color + '80' : color + 'cc');
+      ctx.font = (isExp ? '500 ' : '') + Math.max(10, Math.min(13, r * 0.7)) + 'px DM Sans, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      // wrap label into 2 lines if needed
+      var words = shortTitle.split(' ');
+      var line1 = '', line2 = '';
+      var mid = Math.ceil(words.length / 2);
+      line1 = words.slice(0, mid).join(' ');
+      line2 = words.slice(mid).join(' ');
+
+      if (line2) {
+        ctx.fillText(line1, pos.x, pos.y - 7);
+        ctx.fillText(line2, pos.x, pos.y + 7);
+      } else {
+        ctx.fillText(line1, pos.x, pos.y);
+      }
+
+      // count badge
+      ctx.font = '10px DM Sans, sans-serif';
+      ctx.fillStyle = color + '88';
+      ctx.fillText(b.count, pos.x, pos.y + r + 12);
+
+      ctx.globalAlpha = 1;
+    });
+
+    // draw expanded highlight nodes
+    if (MAP.hlNodes.length) {
+      var bookPos = worldToScreen(MAP.expandedBook.x, MAP.expandedBook.y);
+      MAP.hlNodes.forEach(function(node) {
+        // line from book to highlight node
+        ctx.beginPath(); ctx.moveTo(bookPos.x, bookPos.y); ctx.lineTo(node.sx, node.sy);
+        ctx.strokeStyle = (THEME_COLORS[MAP.expandedBook.theme] || '#888') + '40';
+        ctx.lineWidth = 1; ctx.stroke();
+
+        // highlight node
+        var isHov = MAP.hoveredHL && MAP.hoveredHL === node;
+        ctx.beginPath(); ctx.arc(node.sx, node.sy, isHov ? 7 : 5, 0, Math.PI * 2);
+        ctx.fillStyle = THEME_COLORS[MAP.expandedBook.theme] || '#888';
+        ctx.globalAlpha = isHov ? 1 : 0.6;
+        ctx.fill(); ctx.globalAlpha = 1;
+      });
+    }
+  }
+
+  function expandBook(book) {
+    MAP.expandedBook = book;
+    // Get highlights for this book
+    var hls = HIGHLIGHTS.filter(function(h) { return h.title === book.title; });
+    // Arrange highlights in a circle around the book
+    var pos = worldToScreen(book.x, book.y);
+    var r = bookRadius(book) + 50 + Math.min(hls.length * 2, 40);
+    MAP.hlNodes = hls.map(function(h, i) {
+      var angle = (i / hls.length) * Math.PI * 2 - Math.PI / 2;
+      return {
+        h: h,
+        sx: pos.x + Math.cos(angle) * r,
+        sy: pos.y + Math.sin(angle) * r
+      };
+    });
+
+    // Show detail panel
+    var color = THEME_COLORS[book.theme] || '#2d5a3d';
+    var detail = document.getElementById('map-detail');
+    detail.innerHTML = '<div class="map-detail-inner">'
+      + '<div class="map-detail-header" style="border-left:3px solid '+color+'">'
+      + '<div class="map-detail-title">'+esc(book.title)+'</div>'
+      + '<div class="map-detail-meta">'+esc(book.author)+' &middot; <span style="color:'+color+'">'+esc(book.theme)+'</span> &middot; '+book.count+' highlights</div>'
+      + '</div>'
+      + '<div class="map-detail-hls" id="map-hl-list">'
+      + hls.map(function(h) {
+          return '<div class="map-hl-item" data-id="'+h.id+'">'
+            + '<div class="map-hl-text">'+esc(h.text.slice(0,180))+(h.text.length>180?'…':'')+'</div>'
+            + (h.note ? '<div class="map-hl-note">'+esc(h.note)+'</div>' : '')
+            + '<div class="map-hl-date">'+fdate(h.date)+'</div>'
+            + '</div>';
+        }).join('')
+      + '</div></div>';
+
+    drawMap();
+
+    // Clicking a highlight in the panel switches to connections view
+    detail.querySelectorAll('.map-hl-item').forEach(function(el) {
+      el.addEventListener('click', function() {
+        var id = parseInt(el.dataset.id);
+        S.tab = 'highlights'; S.view = 'conn'; S.sel = id;
+        if (MAP.animFrame) { cancelAnimationFrame(MAP.animFrame); MAP.animFrame = null; }
+        render();
+      });
+    });
+  }
+
+  function bindMapEvents() {
+    var canvas = MAP.canvas; if (!canvas) return;
+
+    function getCanvasXY(e) {
+      var rect = canvas.getBoundingClientRect();
+      var touch = e.touches ? e.touches[0] : e;
+      return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+    }
+    function getBookAt(x, y) {
+      if (!mapPositions) return null;
+      for (var i = mapPositions.length - 1; i >= 0; i--) {
+        var b = mapPositions[i];
+        var pos = worldToScreen(b.x, b.y);
+        var r = bookRadius(b);
+        var dx = x - pos.x, dy = y - pos.y;
+        if (dx*dx + dy*dy <= r*r) return b;
+      }
+      return null;
+    }
+
+    canvas.addEventListener('wheel', function(e) {
+      e.preventDefault();
+      var delta = e.deltaY > 0 ? 0.9 : 1.1;
+      // zoom toward cursor
+      var rect = canvas.getBoundingClientRect();
+      var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      var wx = (mx - MAP.width/2 - MAP.panX), wy = (my - MAP.height/2 - MAP.panY);
+      MAP.scale = Math.max(0.4, Math.min(4, MAP.scale * delta));
+      MAP.panX = mx - MAP.width/2 - wx * delta;
+      MAP.panY = my - MAP.height/2 - wy * delta;
+      // recalculate hlNodes positions if expanded
+      if (MAP.expandedBook) expandBook(MAP.expandedBook);
+      else drawMap();
+    }, { passive: false });
+
+    canvas.addEventListener('mousedown', function(e) {
+      var p = getCanvasXY(e);
+      var book = getBookAt(p.x, p.y);
+      if (book) { expandBook(book); return; }
+      MAP.isPanning = true; MAP.lastPanX = p.x; MAP.lastPanY = p.y;
+      canvas.style.cursor = 'grabbing';
+    });
+    canvas.addEventListener('mousemove', function(e) {
+      var p = getCanvasXY(e);
+      if (MAP.isPanning) {
+        MAP.panX += p.x - MAP.lastPanX; MAP.panY += p.y - MAP.lastPanY;
+        MAP.lastPanX = p.x; MAP.lastPanY = p.y;
+        drawMap(); return;
+      }
+      var book = getBookAt(p.x, p.y);
+      if (book !== MAP.hoveredBook) { MAP.hoveredBook = book; canvas.style.cursor = book ? 'pointer' : 'grab'; drawMap(); }
+    });
+    canvas.addEventListener('mouseup', function() { MAP.isPanning = false; canvas.style.cursor = MAP.hoveredBook ? 'pointer' : 'grab'; });
+    canvas.addEventListener('mouseleave', function() { MAP.isPanning = false; MAP.hoveredBook = null; drawMap(); });
+    canvas.style.cursor = 'grab';
+  }
 
 })();
